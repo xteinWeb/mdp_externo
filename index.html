@@ -219,10 +219,15 @@
                             <label>Estado</label>
                             <select id="admin-filter-status" class="filter-input">
                                 <option value="">Todos</option>
-                                <option value="NORMAL">Normal</option>
+                                <option value="PRODUCCION">En Producción</option>
                                 <option value="RETROCESO">Retroceso</option>
                                 <option value="DESPACHADO">Despachado</option>
                             </select>
+                        </div>
+                        <div class="filter-group">
+                            <label>Líder</label>
+                            <input type="text" id="admin-filter-leader" placeholder="Nombre Líder..."
+                                class="filter-input">
                         </div>
                         <div class="filter-actions">
                             <button id="admin-clear-filters" class="btn-secondary btn-small">Limpiar</button>

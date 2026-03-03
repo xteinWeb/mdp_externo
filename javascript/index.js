@@ -145,7 +145,38 @@ function setupLogin() {
 // DASHBOARD DE ADMINISTRACIÓN
 // ---------------------------------------------------------
 
+async function fetchMasterData(orderIds, productCodes) {
+    if (orderIds.length === 0) return;
+
+    try {
+        const [resOrders, resProducts] = await Promise.all([
+            supabaseClient.from('ordenes_produccion').select('*').in('id', orderIds),
+            supabaseClient.from('productos').select('codigo, nombre').in('codigo', productCodes)
+        ]);
+
+        if (resOrders.data) {
+            resOrders.data.forEach(o => {
+                ordersMap[o.id] = {
+                    product: o.producto,
+                    OC: o.OC,
+                    consecutivo: o.consecutivo,
+                    displayId: `${o.OC || ''}-${o.consecutivo || o.id}`.replace(/^-|-$/, '')
+                };
+            });
+        }
+
+        if (resProducts.data) {
+            resProducts.data.forEach(p => {
+                productsMap[p.codigo] = p.nombre;
+            });
+        }
+    } catch (err) {
+        console.error('Error fetching master data:', err);
+    }
+}
+
 async function loadAdminDashboard() {
+
     const historyBody = document.getElementById('admin-history-body');
     const tableLoader = document.getElementById('table-loader');
 
@@ -164,7 +195,12 @@ async function loadAdminDashboard() {
 
         adminHistoryData = history || [];
 
-        // 2. Poblar selector de productos de admin si está vacío
+        // 2. Enriquecer con Datos Maestro (OCs y Nombres de Productos)
+        const orderIds = [...new Set(adminHistoryData.map(h => h.id_orden))];
+        const productCodes = [...new Set(adminHistoryData.map(h => h.producto))];
+        await fetchMasterData(orderIds, productCodes);
+
+        // 3. Poblar selector de productos de admin si está vacío
         const productSelect = document.getElementById('admin-filter-product');
         if (productSelect && productSelect.options.length <= 1) {
             const products = [...new Set(adminHistoryData.map(h => h.producto))].sort();
@@ -180,11 +216,13 @@ async function loadAdminDashboard() {
         document.getElementById('admin-filter-product').onchange = applyAdminFilters;
         document.getElementById('admin-filter-worker').oninput = applyAdminFilters;
         document.getElementById('admin-filter-status').onchange = applyAdminFilters;
+        document.getElementById('admin-filter-leader').oninput = applyAdminFilters;
         document.getElementById('admin-clear-filters').onclick = () => {
             document.getElementById('admin-filter-op').value = '';
             document.getElementById('admin-filter-product').value = '';
             document.getElementById('admin-filter-worker').value = '';
             document.getElementById('admin-filter-status').value = '';
+            document.getElementById('admin-filter-leader').value = '';
             renderAdminHistory(adminHistoryData);
         };
 
@@ -208,9 +246,12 @@ function renderAdminHistory(data) {
         const fecha = new Date(h.fecha_movimiento);
         const fechaStr = fecha.toLocaleDateString() + ' ' + fecha.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+        const orderInfo = ordersMap[h.id_orden] || { displayId: h.id_orden };
+        const productName = productsMap[h.producto] || h.producto;
+
         // Badge de estatus
         let statusClass = 'status-normal';
-        let statusText = 'Normal';
+        let statusText = 'En Producción';
 
         if (h.estatus_final === 'RETROCESO') {
             statusClass = 'status-retroceso';
@@ -228,9 +269,10 @@ function renderAdminHistory(data) {
                 <span class="row-sub-info">ID: ${h.id}</span>
             </td>
             <td>
-                <span class="row-main-info">OP: ${h.id_orden}</span>
-                <span class="row-sub-info">${h.producto}</span>
+                <span class="row-main-info">OP: ${orderInfo.displayId}</span>
+                <span class="row-sub-info">${productName}</span>
             </td>
+
             <td>
                 <div class="movement-path">
                     <span>${h.seccion_origen || 'Inicio'}</span>
@@ -243,6 +285,7 @@ function renderAdminHistory(data) {
             <td>
                 <span class="row-main-info">${h.operarios || 'N/A'}</span>
                 <span class="row-sub-info">Hora: ${h.hora_salida || '--:--'}</span>
+                <span class="row-sub-info">Líder: <b>${h.lider_que_movio || '---'}</b></span>
             </td>
             <td>
                 <div class="obs-text" title="${h.observaciones || ''}">${h.observaciones || '--'}</div>
@@ -257,18 +300,20 @@ function applyAdminFilters() {
     const product = document.getElementById('admin-filter-product').value;
     const worker = document.getElementById('admin-filter-worker').value.toLowerCase();
     const status = document.getElementById('admin-filter-status').value;
+    const leader = document.getElementById('admin-filter-leader').value.toLowerCase();
 
     const filtered = adminHistoryData.filter(h => {
         const matchOp = !op || String(h.id_orden).toLowerCase().includes(op);
         const matchProduct = !product || h.producto === product;
         const matchWorker = !worker || (h.operarios && h.operarios.toLowerCase().includes(worker));
+        const matchLeader = !leader || (h.lider_que_movio && h.lider_que_movio.toLowerCase().includes(leader));
 
         let matchStatus = true;
         if (status === 'RETROCESO') matchStatus = h.estatus_final === 'RETROCESO';
         else if (status === 'DESPACHADO') matchStatus = h.estatus_final === 'Despachado' || h.estatus_final === 'DESPACHADO';
-        else if (status === 'NORMAL') matchStatus = h.estatus_final !== 'RETROCESO' && h.estatus_final !== 'Despachado' && h.estatus_final !== 'DESPACHADO';
+        else if (status === 'PRODUCCION') matchStatus = h.estatus_final !== 'RETROCESO' && h.estatus_final !== 'Despachado' && h.estatus_final !== 'DESPACHADO';
 
-        return matchOp && matchProduct && matchWorker && matchStatus;
+        return matchOp && matchProduct && matchWorker && matchStatus && matchLeader;
     });
 
     renderAdminHistory(filtered);
@@ -695,6 +740,7 @@ async function saveAllMovements() {
                 observaciones: m.obs + (isMerge ? ` (Unión de partes - Cant. Ensamble: ${finalMergeQty})` : ''),
                 operarios: m.workers,
                 hora_salida: m.exitTime,
+                lider_que_movio: currentUserData.nombre || currentUserData.usuario,
                 fecha_movimiento: new Date().toISOString()
             });
 
@@ -909,6 +955,7 @@ async function submitRollback() {
             observaciones: `RETROCESO: ${reason}`,
             operarios: workers,
             hora_salida: exitTime,
+            lider_que_movio: currentUserData.nombre || currentUserData.usuario,
             fecha_movimiento: timestamp
         };
 
