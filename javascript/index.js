@@ -81,6 +81,44 @@ function findNextAllowedSections(currentSecNorm, flowRules, allowedNorms, visite
     return unique;
 }
 
+/**
+ * Calcula la ruta completa de secciones para un producto según el flujo y secciones permitidas.
+ */
+function getFullProductPath(productCode) {
+    const flowType = (prodFlowTypeMap[productCode] || '').toLowerCase();
+    const allowedSections = prodSectionsMap[productCode] || new Set();
+    const flowRules = flowType.includes('pintura') ? flowsCache.pintura : flowsCache.tapiceria;
+    const allowedNorms = Array.from(allowedSections).map(s => normalizeStr(s));
+
+    if (!flowRules || flowRules.length === 0) return "N/A (Sin reglas de flujo)";
+
+    // Encontrar la sección inicial (aquella que no tiene predecesora o cuya predecesora no está en el flujo)
+    // O simplemente empezar desde las que tienen predecesora vacía en las reglas
+    let currentSections = flowRules.filter(r => !r.predecesora || r.predecesora.trim() === "");
+
+    // Filtrar solo las que le tocan al producto
+    let fullPath = [];
+    let visited = new Set();
+
+    function trace(currentSecNorm) {
+        if (visited.has(currentSecNorm)) return;
+        visited.add(currentSecNorm);
+
+        const sectionName = Array.from(allowedSections).find(s => normalizeStr(s) === currentSecNorm);
+        if (sectionName) {
+            fullPath.push(sectionName);
+        }
+
+        const nextOptions = findNextAllowedSections(currentSecNorm, flowRules, allowedNorms);
+        nextOptions.forEach(opt => trace(normalizeStr(opt.seccion)));
+    }
+
+    // Iniciamos el rastro desde las raíces
+    currentSections.forEach(root => trace(normalizeStr(root.seccion)));
+
+    return fullPath.length > 0 ? fullPath.join(" -> ") : "No se encontró ruta válida";
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     initApp();
 });
@@ -93,6 +131,7 @@ async function initApp() {
         setupLogin();
         setupFilters();
         setupRollbackForm();
+        setupGlobalMassFill();
         checkExistingSession();
     } catch (err) {
         console.error('Error crítico al iniciar:', err);
@@ -477,6 +516,14 @@ async function loadProductionTracking(userData) {
             prodSectionsMap[ps.codigo].add(ps.seccion_planta);
         });
 
+        // LOG DE RUTAS DE PRODUCTOS
+        console.group('%c RUTAS DE SECCIONES POR PRODUCTO ', 'background: #222; color: #bada55; font-size: 12px;');
+        productCodes.forEach(code => {
+            const path = getFullProductPath(code);
+            console.log(`%c Producto: ${code} (${productsMap[code] || '?'}) %c Ruta: ${path} `, 'font-weight: bold; color: #4CAF50', 'color: #2196F3');
+        });
+        console.groupEnd();
+
         // 5. Preparar Filtros y Renderizar
         updateFilterOptions();
         filtersContainer.style.display = 'flex';
@@ -585,7 +632,9 @@ function renderCurrentTables(data) {
         const optionsHtml = finalOptions.length > 0
             ? finalOptions.map(o => {
                 const targetPlant = sectionToPlantMap[o.seccion] || "";
-                return `<option value="${o.seccion}" data-is-final="${o.final_seccion}" data-target-plant="${targetPlant}">${o.seccion}</option>`;
+                const isPlantChange = targetPlant && targetPlant !== item.planta;
+                const displayLabel = isPlantChange ? `FINALIZAR EN ESTA PLANTA (Hacia: ${targetPlant})` : o.seccion;
+                return `<option value="${o.seccion}" data-is-final="${o.final_seccion}" data-target-plant="${targetPlant}">${displayLabel}</option>`;
             }).join('')
             : '<option value="FIN_PROCESO">Fin del proceso</option>';
 
@@ -699,6 +748,7 @@ async function saveAllMovements() {
     const trackingUpdates = [];
     const trackingInserts = [];
     const trackingDeletions = [];
+    const movedToOtherPlant = [];
     let plantChangeDetected = false;
 
     // 3. Procesar cada grupo (normal o unión)
@@ -746,6 +796,9 @@ async function saveAllMovements() {
 
             if (m.targetPlant && m.targetPlant !== m.currentPlant) {
                 plantChangeDetected = true;
+                const orderInfo = ordersMap[m.orderId] || {};
+                const prodName = productsMap[m.product] || m.product;
+                movedToOtherPlant.push(`• OP: ${orderInfo.displayId} - ${prodName} (Hacia: ${m.targetPlant})`);
             }
 
             const remainder = m.originalQty - m.nextQty;
@@ -832,7 +885,8 @@ async function saveAllMovements() {
         }
 
         if (plantChangeDetected) {
-            alert('¡Movimientos registrados! Algunos productos han pasado a la siguiente planta de producción.');
+            const list = movedToOtherPlant.join('\n');
+            alert(`¡Movimientos registrados!\n\nSe ha terminado la producción en esta planta para:\n${list}`);
         } else {
             alert('¡Movimientos registrados con éxito!');
         }
@@ -981,7 +1035,11 @@ async function submitRollback() {
 
         if (updErr) throw updErr;
 
-        alert('El proceso ha sido retrocedido con éxito.');
+        if (isPlantChange) {
+            alert(`¡Retroceso registrado!\n\nSe ha terminado la producción en esta planta para:\n• OP: ${ordersMap[activeRollbackItem.id_orden]?.displayId} - ${productsMap[ordersMap[activeRollbackItem.id_orden]?.product] || ordersMap[activeRollbackItem.id_orden]?.product} (Hacia: ${targetPlant})`);
+        } else {
+            alert('El proceso ha sido retrocedido con éxito.');
+        }
         closeRollbackModal();
         loadProductionTracking(currentUserData);
 
@@ -996,7 +1054,50 @@ async function submitRollback() {
     }
 }
 
-// Hacer global para onclick
+function setupGlobalMassFill() {
+    const gWorkers = document.getElementById('global-workers');
+    const gExitTime = document.getElementById('global-exit-time');
+
+    if (!gWorkers || !gExitTime) return;
+
+    // Seteamos hora actual por defecto si está vacío
+    if (!gExitTime.value) {
+        gExitTime.value = new Date().toTimeString().slice(0, 5);
+    }
+
+    const applyBatch = () => {
+        const rows = document.querySelectorAll('#production-body tr');
+        rows.forEach(row => {
+            const nextSec = row.querySelector('.next-sec')?.value;
+            if (nextSec && nextSec !== "") {
+                const rowWorkers = row.querySelector('.num-workers');
+                const rowExitTime = row.querySelector('.exit-time');
+
+                if (rowWorkers) rowWorkers.value = gWorkers.value;
+                if (rowExitTime) rowExitTime.value = gExitTime.value;
+            }
+        });
+    };
+
+    gWorkers.addEventListener('input', applyBatch);
+    gExitTime.addEventListener('input', applyBatch);
+
+    // También re-aplicar cuando se cambie una sección individual
+    document.addEventListener('change', (e) => {
+        if (e.target.classList.contains('next-sec')) {
+            const val = e.target.value;
+            if (val && val !== "") {
+                const row = e.target.closest('tr');
+                const rowWorkers = row.querySelector('.num-workers');
+                const rowExitTime = row.querySelector('.exit-time');
+                if (rowWorkers) rowWorkers.value = gWorkers.value;
+                if (rowExitTime) rowExitTime.value = gExitTime.value;
+            }
+        }
+    });
+}
+
+// HACER GLOBAL PARA ONCLICK
 console.log('Exponiendo funciones globales...');
 window.switchTab = switchTab;
 window.startProduction = startProduction;

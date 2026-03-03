@@ -87,16 +87,6 @@
             </header>
 
             <div id="content-root">
-                <div class="view-header">
-                    <div class="header-main">
-                        <h2>Seguimiento de Producción</h2>
-                        <p id="plant-info" class="text-secondary">Cargando planta...</p>
-                    </div>
-                    <button id="save-movements-btn" class="btn-primary btn-save" style="display: none;">
-                        <span class="icon">💾</span> Guardar Movimientos
-                    </button>
-                </div>
-
                 <!-- Barra de Filtros -->
                 <div class="filters-bar" id="filters-container" style="display: none;">
                     <div class="filter-group">
@@ -126,6 +116,32 @@
                     <div class="filter-actions">
                         <button id="clear-filters-btn" class="btn-secondary btn-small">Limpiar</button>
                     </div>
+                </div>
+
+                <div class="view-header">
+                    <div class="header-main">
+                        <h2>Seguimiento de Producción</h2>
+                        <div id="plant-info" class="text-secondary">Cargando planta...</div>
+                    </div>
+
+                    <div class="global-fill-container"
+                        style="display: flex; gap: 10px; align-items: center; background: #f4f7f6; padding: 10px; border-radius: 8px; border: 1px solid #e0e0e0; margin-left: auto; margin-right: 15px;">
+                        <div style="display: flex; flex-direction: column;">
+                            <label style="font-size: 0.7rem; color: #666; font-weight: bold;">Trabajadores
+                                (Global)</label>
+                            <input type="number" id="global-workers" class="table-input" value="1" min="1"
+                                style="width: 80px;">
+                        </div>
+                        <div style="display: flex; flex-direction: column;">
+                            <label style="font-size: 0.7rem; color: #666; font-weight: bold;">Hora Salida
+                                (Global)</label>
+                            <input type="time" id="global-exit-time" class="table-input" style="width: 100px;">
+                        </div>
+                    </div>
+
+                    <button id="save-movements-btn" class="btn-primary btn-save" style="display: none;">
+                        <span class="icon">💾</span> Guardar Movimientos
+                    </button>
                 </div>
 
                 <div class="tabs-nav">
