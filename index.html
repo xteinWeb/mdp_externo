@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MDP ARTDECON - Gestión de Producción</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <link rel="stylesheet" href="estilos/index.css">
+</head>
+
+<body>
+    <div id="app">
+        <div id="login-screen" class="modal-overlay">
+            <div class="login-card">
+                <div class="brand">
+                    <span class="logo">MDP</span>
+                    <span class="logo-text">ARTDECON</span>
+                </div>
+                <h2>Iniciar Sesión</h2>
+                <p>Sistema de Gestión de Producción</p>
+                <form id="login-form">
+                    <div class="input-group">
+                        <label for="username">Usuario</label>
+                        <input type="text" id="username" placeholder="Tu usuario" required autocomplete="username">
+                    </div>
+                    <div class="input-group">
+                        <label for="password">Contraseña</label>
+                        <input type="password" id="password" placeholder="••••••••" required
+                            autocomplete="current-password">
+                    </div>
+                    <button type="submit" class="btn-primary" id="login-btn">Entrar al Sistema</button>
+                    <p id="login-error" class="error-msg"></p>
+                </form>
+            </div>
+        </div>
+
+        <!-- Modal de Retroceso -->
+        <div id="modal-rollback" class="modal-overlay" style="display: none;">
+            <div class="modal-card">
+                <h3>⚠️ Retroceder Proceso</h3>
+                <p id="rollback-info" class="text-secondary" style="margin-bottom: 1.5rem;">Cargando información...</p>
+
+                <form id="rollback-form">
+                    <div class="input-group">
+                        <label>Enviar a Sección:</label>
+                        <select id="rollback-target-sec" class="filter-input" required>
+                            <option value="">Seleccione sección anterior...</option>
+                        </select>
+                    </div>
+                    <div class="input-group">
+                        <label>Motivo del retroceso:</label>
+                        <textarea id="rollback-reason" class="filter-input" rows="3"
+                            placeholder="Explique por qué se retrocede (ej: error pintura, pieza rayada...)"
+                            required></textarea>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.5rem;">
+                        <div class="input-group" style="margin-bottom: 0;">
+                            <label>Trabajadores:</label>
+                            <input type="number" id="rollback-workers" class="filter-input" value="1" min="1" required>
+                        </div>
+                        <div class="input-group" style="margin-bottom: 0;">
+                            <label>Hora Salida:</label>
+                            <input type="time" id="rollback-exit-time" class="filter-input" required>
+                        </div>
+                    </div>
+
+                    <div class="modal-footer">
+                        <button type="button" class="btn-secondary" onclick="closeRollbackModal()">Cancelar</button>
+                        <button type="submit" class="btn-primary" style="margin-top: 0;">Confirmar Retroceso</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div id="main-container" style="display: none;">
+            <header class="simple-header">
+                <div class="header-left">
+                    <span class="logo-text-small">MDP ARTDECON</span>
+                </div>
+                <div class="header-right">
+                    <span id="welcome-user"></span>
+                    <button id="logout-btn" class="btn-text">Cerrar Sesión</button>
+                </div>
+            </header>
+
+            <div id="content-root">
+                <div class="view-header">
+                    <div class="header-main">
+                        <h2>Seguimiento de Producción</h2>
+                        <p id="plant-info" class="text-secondary">Cargando planta...</p>
+                    </div>
+                    <button id="save-movements-btn" class="btn-primary btn-save" style="display: none;">
+                        <span class="icon">💾</span> Guardar Movimientos
+                    </button>
+                </div>
+
+                <!-- Barra de Filtros -->
+                <div class="filters-bar" id="filters-container" style="display: none;">
+                    <div class="filter-group">
+                        <label>Orden / OC</label>
+                        <input type="text" id="filter-op" placeholder="Buscar OP..." class="filter-input">
+                    </div>
+                    <div class="filter-group">
+                        <label>Producto</label>
+                        <select id="filter-product" class="filter-input">
+                            <option value="">Todos los productos</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>Sección</label>
+                        <select id="filter-section" class="filter-input">
+                            <option value="">Todas las secciones</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>Tipo de Flujo</label>
+                        <select id="filter-flow" class="filter-input">
+                            <option value="">Todos los flujos</option>
+                            <option value="pintura">Pintura</option>
+                            <option value="tapiceria">Tapicería</option>
+                        </select>
+                    </div>
+                    <div class="filter-actions">
+                        <button id="clear-filters-btn" class="btn-secondary btn-small">Limpiar</button>
+                    </div>
+                </div>
+
+                <div class="tabs-nav">
+                    <button class="tab-btn" id="tab-btn-pending" onclick="switchTab('pending')">
+                        Pendientes por Iniciar
+                    </button>
+                    <button class="tab-btn active" id="tab-btn-process" onclick="switchTab('process')">
+                        En Labor / Movimientos
+                    </button>
+                </div>
+
+                <!-- Sección Pendientes -->
+                <div id="view-pending" class="tab-content">
+                    <div class="table-container">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Orden</th>
+                                    <th>Sección</th>
+                                    <th>Cant.</th>
+                                    <th>Producto</th>
+                                    <th>Acción</th>
+                                </tr>
+                            </thead>
+                            <tbody id="pending-body">
+                                <!-- Datos dinámicos -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Sección En Proceso -->
+                <div id="view-process" class="tab-content active">
+                    <div class="table-container">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Orden</th>
+                                    <th>Sección</th>
+                                    <th>Cant.</th>
+                                    <th>Producto</th>
+                                    <th>Siguiente Sección</th>
+                                    <th>Nueva Cant.</th>
+                                    <th>Trabajadores</th>
+                                    <th>Hora Salida</th>
+                                    <th>Observaciones</th>
+                                    <th>Acción</th>
+                                </tr>
+                            </thead>
+                            <tbody id="production-body">
+                                <!-- Datos dinámicos -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="table-loader" class="loader-container">
+                    <div class="spinner"></div>
+                    <p>Buscando procesos...</p>
+                </div>
+                <div id="empty-state" class="empty-state" style="display: none;">
+                    <p>No se encontraron procesos en esta planta.</p>
+                </div>
+
+                <!-- VISTA ADMINISTRADOR -->
+                <div id="view-admin" style="display: none;">
+                    <div class="view-header">
+                        <div class="header-main">
+                            <h2>Vigilancia de Producción</h2>
+                            <p class="text-secondary">Monitoreo global del historial de movimientos</p>
+                        </div>
+                    </div>
+
+                    <!-- Filtros Admin -->
+                    <div class="filters-bar" id="admin-filters-container">
+                        <div class="filter-group">
+                            <label>Orden / OC</label>
+                            <input type="text" id="admin-filter-op" placeholder="Buscar OP..." class="filter-input">
+                        </div>
+                        <div class="filter-group">
+                            <label>Producto</label>
+                            <select id="admin-filter-product" class="filter-input">
+                                <option value="">Todos los productos</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label>Operario</label>
+                            <input type="text" id="admin-filter-worker" placeholder="Nombre..." class="filter-input">
+                        </div>
+                        <div class="filter-group">
+                            <label>Estado</label>
+                            <select id="admin-filter-status" class="filter-input">
+                                <option value="">Todos</option>
+                                <option value="NORMAL">Normal</option>
+                                <option value="RETROCESO">Retroceso</option>
+                                <option value="DESPACHADO">Despachado</option>
+                            </select>
+                        </div>
+                        <div class="filter-actions">
+                            <button id="admin-clear-filters" class="btn-secondary btn-small">Limpiar</button>
+                        </div>
+                    </div>
+
+                    <div class="table-container">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Fecha / Hora</th>
+                                    <th>Orden / Producto</th>
+                                    <th>Movimiento</th>
+                                    <th>Cant.</th>
+                                    <th>Persona(s)</th>
+                                    <th>Observaciones</th>
+                                </tr>
+                            </thead>
+                            <tbody id="admin-history-body">
+                                <!-- Datos dinámicos -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="javascript/index.js"></script>
+</body>
+
+</html>
