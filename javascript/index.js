@@ -17,10 +17,10 @@ let sectionToPlantMap = {};
 function normalizeStr(str) {
     if (!str) return "";
     return str.toString()
-        .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Remueve tildes (acentos)
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Remueve tildes
         .toLowerCase()
         .replace(/\s+/g, '')        // Quita espacios
-        .replace(/[\/\-_]/g, '')   // Quita barras, guiones, etc
+        .replace(/[\/\-_.]/g, '')  // Quita barras, guiones y PUNTOS
         .trim();
 }
 
@@ -38,15 +38,24 @@ function findNextAllowedSections(currentSecNorm, flowRules, allowedNorms, visite
     currentRules.forEach(currRule => {
         if (currRule.final_seccion) {
             // El trigger puede ser "FIN G", "FIN GA", etc. 
-            // Lo normalizamos para comparar con los campos 'predecesora'
-            const groupTriggerNorm = normalizeStr(`FIN ${currRule.grupo}`);
+            const groupTrigger = `FIN ${currRule.grupo}`;
+            const groupTriggerNorm = normalizeStr(groupTrigger);
 
             const groupNext = flowRules.filter(r => {
                 const predNorm = normalizeStr(r.predecesora);
-                // Usamos includes pero validamos que sea una palabra completa o un patrón reconocido
+                // Soporte para múltiples disparadores unidos por "+" (ej: FIN G2 + FIN G3)
                 return predNorm === groupTriggerNorm || predNorm.includes(groupTriggerNorm);
             });
 
+            if (groupNext.length > 0) {
+                candidates.push(...groupNext);
+            }
+        } else if (candidates.length === 0) {
+            // [NUEVO] Si la sección es parte de un grupo pero NO hay más pasos directos permitidos,
+            // intentamos ver si el fin de este grupo lleva a algún lado.
+            const groupTrigger = `FIN ${currRule.grupo}`;
+            const groupTriggerNorm = normalizeStr(groupTrigger);
+            const groupNext = flowRules.filter(r => normalizeStr(r.predecesora).includes(groupTriggerNorm));
             if (groupNext.length > 0) {
                 candidates.push(...groupNext);
             }
@@ -57,16 +66,13 @@ function findNextAllowedSections(currentSecNorm, flowRules, allowedNorms, visite
     candidates.forEach(c => {
         const cNorm = normalizeStr(c.seccion);
         if (allowedNorms.includes(cNorm)) {
-            // Éxito: Encontrada sección válida
             results.push(c);
         } else {
-            // Salto: Esta sección no le toca al producto, seguimos buscando recursivo
             const deeper = findNextAllowedSections(cNorm, flowRules, allowedNorms, visited);
             results.push(...deeper);
         }
     });
 
-    // Eliminar duplicados por nombre de sección
     const unique = [];
     const seen = new Set();
     for (const item of results) {
@@ -76,8 +82,6 @@ function findNextAllowedSections(currentSecNorm, flowRules, allowedNorms, visite
             unique.push(item);
         }
     }
-
-
     return unique;
 }
 
@@ -92,11 +96,13 @@ function getFullProductPath(productCode) {
 
     if (!flowRules || flowRules.length === 0) return "N/A (Sin reglas de flujo)";
 
-    // Encontrar la sección inicial (aquella que no tiene predecesora o cuya predecesora no está en el flujo)
-    // O simplemente empezar desde las que tienen predecesora vacía en las reglas
-    let currentSections = flowRules.filter(r => !r.predecesora || r.predecesora.trim() === "");
+    // Las secciones iniciales son aquellas sin predecesora o marcadas como "INICIO"
+    let currentSections = flowRules.filter(r =>
+        !r.predecesora ||
+        r.predecesora.trim() === "" ||
+        normalizeStr(r.predecesora) === "inicio"
+    );
 
-    // Filtrar solo las que le tocan al producto
     let fullPath = [];
     let visited = new Set();
 
@@ -113,10 +119,187 @@ function getFullProductPath(productCode) {
         nextOptions.forEach(opt => trace(normalizeStr(opt.seccion)));
     }
 
-    // Iniciamos el rastro desde las raíces
-    currentSections.forEach(root => trace(normalizeStr(root.seccion)));
+    currentSections.forEach(root => {
+        // Si el inicio es una sección permitida, empezamos desde ahí
+        if (allowedNorms.includes(normalizeStr(root.seccion))) {
+            trace(normalizeStr(root.seccion));
+        } else {
+            // Si el inicio no es para este producto, saltamos hacia adelante
+            const firstAllowed = findNextAllowedSections(normalizeStr(root.seccion), flowRules, allowedNorms);
+            firstAllowed.forEach(opt => trace(normalizeStr(opt.seccion)));
+        }
+    });
 
-    return fullPath.length > 0 ? fullPath.join(" -> ") : "No se encontró ruta válida";
+    return fullPath.length > 0 ? fullPath.join(" -> ") : "No se encontró ruta válida (Verifique uniones/grupos)";
+}
+
+/**
+ * Verifica si una sección destino es alcanzable desde una sección origen en la ruta del producto.
+ */
+function isSectionInFuturePath(startSection, targetSection, productCode) {
+    const startNorm = normalizeStr(startSection);
+    const targetNorm = normalizeStr(targetSection);
+    if (startNorm === targetNorm) return false;
+
+    const flowType = (prodFlowTypeMap[productCode] || '').toLowerCase();
+    const flowRules = flowType.includes('pintura') ? flowsCache.pintura : flowsCache.tapiceria;
+    const allowedSections = prodSectionsMap[productCode] || new Set();
+    const allowedNorms = Array.from(allowedSections).map(s => normalizeStr(s));
+
+    let queue = [startNorm];
+    let visited = new Set();
+
+    while (queue.length > 0) {
+        let curr = queue.shift();
+        if (visited.has(curr)) continue;
+        visited.add(curr);
+
+        let nexts = findNextAllowedSections(curr, flowRules, allowedNorms);
+        for (let n of nexts) {
+            let nNorm = normalizeStr(n.seccion);
+            if (nNorm === targetNorm) return true;
+            queue.push(nNorm);
+        }
+    }
+    return false;
+}
+
+/**
+ * Identifica dinámicamente qué secciones de la ruta del producto convergen en una sección destino.
+ */
+function getProductPredecessors(productCode, targetSection) {
+    const flowType = (prodFlowTypeMap[productCode] || '').toLowerCase();
+    const flowRules = flowType.includes('pintura') ? flowsCache.pintura : flowsCache.tapiceria;
+    const allowedSections = prodSectionsMap[productCode] || new Set();
+    const allowedNorms = Array.from(allowedSections).map(s => normalizeStr(s));
+    const targetNorm = normalizeStr(targetSection);
+
+    let predecessorsFound = [];
+
+    // Buscamos en todas las secciones permitidas del producto
+    allowedSections.forEach(potentialPred => {
+        const predNorm = normalizeStr(potentialPred);
+        if (predNorm === targetNorm) return;
+
+        // Si desde esta sección el flujo permite llegar directamente a la sección destino...
+        const nextPossible = findNextAllowedSections(predNorm, flowRules, allowedNorms);
+        if (nextPossible.some(opt => normalizeStr(opt.seccion) === targetNorm)) {
+            predecessorsFound.push(potentialPred);
+        }
+    });
+
+    return predecessorsFound;
+}
+
+/**
+ * Obtiene todos los puntos de unión (donde convergen 2+ ramas) para un producto.
+ */
+function getAllMergePoints(productCode) {
+    const allowedSections = prodSectionsMap[productCode] || new Set();
+    const mergePoints = [];
+    allowedSections.forEach(sec => {
+        const preds = getProductPredecessors(productCode, sec);
+        if (preds.length > 1) {
+            mergePoints.push(sec);
+        }
+    });
+    return mergePoints;
+}
+
+/**
+ * Valida si un item puede moverse a la sección destino considerando la unión de partes.
+ * Ahora es una sincronización TOTAL: No se puede avanzar a un merge o PASAR un merge 
+ * si otras piezas de la orden están retrasadas en sus ramas.
+ */
+function validateMergeReady(item, nextSection, currentBatchMovements = []) {
+    // IGNORAR SI EL DESTINO ES UNA SECCIÓN DE CONTROL
+    if (nextSection.toLowerCase().startsWith('control')) return { ready: true, missingSections: [] };
+
+    const orderInfo = ordersMap[item.id_orden] || {};
+    const productCode = orderInfo.product;
+
+    // [NUEVO] IGNORAR SI EL DESTINO ES UNA SECCIÓN INICIAL (Predecesora: INICIO)
+    const flowType = (prodFlowTypeMap[productCode] || '').toLowerCase();
+    const flowRules = flowType.includes('pintura') ? flowsCache.pintura : flowsCache.tapiceria;
+    const nextNorm = normalizeStr(nextSection);
+    const isInitial = flowRules.some(r => normalizeStr(r.seccion) === nextNorm && (normalizeStr(r.predecesora) === 'inicio' || !r.predecesora));
+    if (isInitial) return { ready: true, missingSections: [] };
+
+    // Todas las piezas de esta orden (todas las plantas)
+    const allPiecesOfOrder = allTrackingData.filter(i => i.id_orden == item.id_orden && i.estatus !== 'Despachado');
+    const itemsInBatch = currentBatchMovements.filter(m => m.orderId == item.id_orden);
+
+    const mergePoints = getAllMergePoints(productCode);
+    let allMissingPredecessors = new Set();
+    const currentSecNorm = normalizeStr(item.seccion_planta);
+    const currentTargetNorm = normalizeStr(nextSection);
+
+    mergePoints.forEach(M => {
+        const mNorm = normalizeStr(M);
+
+        // ¿Esta pieza está intentando SALIR de un punto de unión M?
+        // Salir significa: estar en M y querer ir a algo que NO sea M.
+        const isTryingToLeaveM = (currentSecNorm === mNorm && currentTargetNorm !== mNorm);
+
+        // ¿Esta pieza ya superó M y quiere seguir adelante?
+        const isAlreadyPastM = isSectionInFuturePath(M, item.seccion_planta, productCode);
+
+        // REGLA DE AVANCE: Si estoy en M (y quiero salir) o ya pasé M...
+        if (isTryingToLeaveM || isAlreadyPastM) {
+            const preds = getProductPredecessors(productCode, M);
+            preds.forEach(P => {
+                const pNorm = normalizeStr(P);
+                const rezagadas = allPiecesOfOrder.filter(po => {
+                    const poSecNorm = normalizeStr(po.seccion_planta);
+
+                    // Si ya llegó a M (aunque sea Pendiente), no está rezagada para EL AVANCE FUERA DE M
+                    const alreadyAtOrPastM = (poSecNorm === mNorm || isSectionInFuturePath(M, po.seccion_planta, productCode));
+                    if (alreadyAtOrPastM) return false;
+
+                    // ¿Está en esta rama P?
+                    const isInThisBranch = (poSecNorm === pNorm || isSectionInFuturePath(po.seccion_planta, P, productCode));
+                    if (isInThisBranch) {
+                        if (po.id == item.id) return false;
+
+                        const movingToCatchUp = itemsInBatch.some(m =>
+                            m.rowId == po.id &&
+                            (normalizeStr(m.nextSec) === mNorm || isSectionInFuturePath(M, m.nextSec, productCode))
+                        );
+                        if (movingToCatchUp) return false;
+
+                        return true;
+                    }
+                    return false;
+                });
+
+                if (rezagadas.length > 0) allMissingPredecessors.add(P);
+            });
+        }
+
+        // REGLA DE UNIÓN OBLIGATORIA: Si estoy en M y voy a avanzar...
+        if (isTryingToLeaveM) {
+            const sistersAtM = allPiecesOfOrder.filter(po => normalizeStr(po.seccion_planta) === mNorm && po.id != item.id);
+            sistersAtM.forEach(sister => {
+                const movement = itemsInBatch.find(m => m.rowId == sister.id);
+
+                if (sister.estatus === 'Pendiente') {
+                    allMissingPredecessors.add(`${M} (Pendiente: ${sister.id})`);
+                }
+                else if (!movement || normalizeStr(movement.nextSec) !== currentTargetNorm) {
+                    allMissingPredecessors.add(`OTRA PIEZA EN ${M} (Unión obligatoria)`);
+                }
+            });
+        }
+    });
+
+    if (allMissingPredecessors.size > 0) {
+        console.warn(`[Unión] Bloqueo en ${item.seccion_planta} -> ${nextSection}:`, Array.from(allMissingPredecessors));
+    }
+
+    return {
+        ready: allMissingPredecessors.size === 0,
+        missingSections: Array.from(allMissingPredecessors)
+    };
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -463,12 +646,11 @@ async function loadProductionTracking(userData) {
             flowsCache.tapiceria = tRes.data || [];
         }
 
-        // 3. Obtener seguimiento
+        // 3. Obtener seguimiento GLOBAL (para validaciones multi-planta)
         const { data: prodData, error: prodError } = await supabaseClient
             .from('seguimiento_produccion')
             .select('*')
-            .eq('planta', plantName)
-            .neq('estatus', 'Despachado') // Ignorar los ya finalizados
+            .neq('estatus', 'Despachado')
             .order('created_at', { ascending: false });
 
         if (prodError) throw prodError;
@@ -579,9 +761,14 @@ function applyFiltersAndRender() {
     const sectionVal = document.getElementById('filter-section')?.value || '';
     const flowVal = document.getElementById('filter-flow')?.value || '';
 
+    const leaderPlant = document.getElementById('plant-info').textContent.replace('Planta: ', '').trim();
+
     const filtered = allTrackingData.filter(item => {
         const orderInfo = ordersMap[item.id_orden] || {};
         const flowType = (prodFlowTypeMap[orderInfo.product] || '').toLowerCase();
+
+        // 1. Filtrar por planta del líder (Solo gestionamos lo propio)
+        if (item.planta !== leaderPlant) return false;
 
         const matchOp = !opVal || normalizeStr(orderInfo.displayId).includes(opVal) || normalizeStr(orderInfo.OC || '').includes(opVal);
         const matchProduct = !productVal || orderInfo.product === productVal;
@@ -648,7 +835,14 @@ function renderCurrentTables(data) {
                 data-current-plant="${item.planta}"
                 data-original-qty="${currentQty}"
                 data-full-item='${JSON.stringify(item)}'>
-                <td><strong>${orderInfo.displayId}</strong> <br> <br> <span class="badge badge-status">${flowType.toUpperCase() || 'N/A'}</span></td>
+                <td>
+                    <strong>${orderInfo.displayId}</strong> 
+                    <br> <br> 
+                    <span class="badge badge-status">${flowType.toUpperCase() || 'N/A'}</span>
+                    <div class="merge-warning" style="display:none; color: #d93025; font-size: 0.75rem; margin-top: 5px; font-weight: 500;">
+                        ⚠️ Esperando parte de: [Sección]
+                    </div>
+                </td>
                 <td>${item.codigo_seccion || '--'} <br><small>${item.seccion_planta || '--'}</small></td>
                 <td>${currentQty}</td>
                 <td style="max-width: 200px; overflow: hidden; word-wrap: break-word;"><small>${orderInfo.product} <br> ${productName}</small></td>
@@ -683,16 +877,28 @@ function renderCurrentTables(data) {
 }
 
 async function startProduction(id) {
+    const item = allTrackingData.find(i => i.id == id);
+    if (!item) return;
+
     try {
+        // Al iniciar un punto de unión, debemos pasar TODAS las partes relacionadas a 'En Proceso'
+        const relatedPending = allTrackingData.filter(i =>
+            i.id_orden === item.id_orden &&
+            i.seccion_planta === item.seccion_planta &&
+            i.estatus === 'Pendiente'
+        );
+
+        const idsToUpdate = relatedPending.length > 0 ? relatedPending.map(i => i.id) : [id];
+
         const { error } = await supabaseClient
             .from('seguimiento_produccion')
             .update({ estatus: 'En Proceso' })
-            .eq('id', id);
+            .in('id', idsToUpdate);
 
         if (error) throw error;
 
         loadProductionTracking(currentUserData);
-        alert('Producción iniciada para este registro.');
+        alert(`Producción iniciada para ${idsToUpdate.length} parte(s).`);
     } catch (err) {
         console.error('Error al iniciar producción:', err);
         alert('Error: ' + err.message);
@@ -735,6 +941,15 @@ async function saveAllMovements() {
     });
 
     if (movements.length === 0) return alert('No hay movimientos seleccionados.');
+
+    // --- VALIDACIÓN DE UNIONES (SINCRONIZACIÓN) ---
+    for (const m of movements) {
+        const validation = validateMergeReady(m.fullItem, m.nextSec, movements);
+        if (!validation.ready) {
+            alert(`Bloqueo de Unión: La orden ${ordersMap[m.orderId]?.displayId} no puede avanzar a "${m.nextSec}" porque faltan partes en: ${validation.missingSections.join(', ')}.\n\nTodas las partes convergentes deben moverse juntas.`);
+            return;
+        }
+    }
 
     // 2. Agrupar por (ID Orden + Sección Destino) para detectar uniones (Ensamble)
     const groups = {};
@@ -1092,7 +1307,50 @@ function setupGlobalMassFill() {
                 const rowExitTime = row.querySelector('.exit-time');
                 if (rowWorkers) rowWorkers.value = gWorkers.value;
                 if (rowExitTime) rowExitTime.value = gExitTime.value;
+
+                // Validación dinámica en tiempo real
+                refreshMergeWarnings();
+            } else {
+                // Si se limpia el select, quitar avisos visuales de esta fila
+                const row = e.target.closest('tr');
+                row.style.backgroundColor = '';
+                const warning = row.querySelector('.merge-warning');
+                if (warning) warning.style.display = 'none';
+                refreshMergeWarnings(); // Re-validar otros que podrían depender de este cambio
             }
+        }
+    });
+}
+
+function refreshMergeWarnings() {
+    const rows = document.querySelectorAll('#production-body tr');
+    const currentMovements = Array.from(rows).map(r => ({
+        rowId: r.dataset.rowId,
+        orderId: r.dataset.orderId,
+        nextSec: r.querySelector('.next-sec').value
+    })).filter(m => m.nextSec);
+
+    rows.forEach(r => {
+        const nextSec = r.querySelector('.next-sec').value;
+        const warning = r.querySelector('.merge-warning');
+        if (!nextSec) {
+            r.style.backgroundColor = '';
+            if (warning) warning.style.display = 'none';
+            return;
+        }
+
+        const item = JSON.parse(r.dataset.fullItem);
+        const validation = validateMergeReady(item, nextSec, currentMovements);
+
+        if (!validation.ready) {
+            r.style.backgroundColor = '#fff0f0';
+            if (warning) {
+                warning.style.display = 'block';
+                warning.innerText = `⚠️ Esperando parte de: ${validation.missingSections.join(', ')}`;
+            }
+        } else {
+            r.style.backgroundColor = '';
+            if (warning) warning.style.display = 'none';
         }
     });
 }
